@@ -230,6 +230,8 @@ class RNN(models.shared_base.SharedModel):
         #
         # For more details, see
         # https://github.com/carpedm20/ENAS-pytorch/issues/6
+        clipped_num = 0
+        max_clipped_norm = 0
         h1tohT = []
         logits = []
         for step in range(time_steps):
@@ -238,7 +240,10 @@ class RNN(models.shared_base.SharedModel):
             hidden_norms = hidden.norm(dim=-1)
             max_norm = 25.0
             if hidden_norms.max() > max_norm:
-                logger.info(f'clipping {hidden_norms.max()} to {max_norm}')
+                clipped_num += 1
+                if hidden_norms.max() > max_clipped_norm:
+                    max_clipped_norm = hidden_norms.max()
+
                 norm = hidden[hidden_norms > max_norm].norm(dim=-1)
                 norm = norm.unsqueeze(-1)
                 detached_norm = torch.autograd.Variable(norm.data,
@@ -247,6 +252,11 @@ class RNN(models.shared_base.SharedModel):
 
             logits.append(logit)
             h1tohT.append(hidden)
+
+        if clipped_num > 0:
+            logger.info(f'clipped {clipped_num} hidden states in one forward '
+                        f'pass. '
+                        f'max clipped hidden state norm: {max_clipped_norm}')
 
         h1tohT = torch.stack(h1tohT)
         output = torch.stack(logits)
