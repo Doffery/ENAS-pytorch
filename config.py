@@ -77,7 +77,6 @@ learn_arg.add_argument('--mode', type=str, default='train',
 learn_arg.add_argument('--batch_size', type=int, default=64)
 learn_arg.add_argument('--test_batch_size', type=int, default=1)
 learn_arg.add_argument('--max_epoch', type=int, default=150)
-learn_arg.add_argument('--entropy_mode', type=str, default='reward', choices=['reward', 'regularizer'])
 
 
 # Controller
@@ -108,7 +107,6 @@ learn_arg.add_argument('--entropy_coeff', type=float, default=1e-4)
 learn_arg.add_argument('--shared_initial_step', type=int, default=0)
 learn_arg.add_argument('--shared_max_step', type=int, default=400,
                        help='step for shared parameters')
-# NOTE(brendan): Should be 10 for CNN architectures.
 learn_arg.add_argument('--shared_num_sample', type=int, default=1,
                        help='# of Monte Carlo samples')
 learn_arg.add_argument('--shared_optim', type=str, default='sgd')

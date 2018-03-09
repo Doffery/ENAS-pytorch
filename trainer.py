@@ -327,9 +327,8 @@ class Trainer(object):
                                          valid_idx,
                                          self.max_length)
         valid_loss, hidden, _ = self.get_loss(inputs, targets, hidden, dag)
-        valid_loss = valid_loss.data.item()
 
-        valid_ppl = math.exp(valid_loss)
+        valid_ppl = torch.exp(valid_loss)
 
         # TODO: we don't know reward_c
         if self.args.ppl_square:
@@ -338,14 +337,7 @@ class Trainer(object):
         else:
             R = self.args.reward_c / valid_ppl
 
-        if self.args.entropy_mode == 'reward':
-            rewards = R + self.args.entropy_coeff * entropies
-        elif self.args.entropy_mode == 'regularizer':
-            rewards = R * np.ones_like(entropies)
-        else:
-            raise NotImplementedError(f'Unkown entropy mode: {self.args.entropy_mode}')
-
-        return rewards, hidden
+        return R.data, hidden
 
     def train_controller(self):
         """Fixes the shared parameters and updates the controller parameters.
@@ -393,7 +385,7 @@ class Trainer(object):
             if 1 > self.args.discount > 0:
                 rewards = discount(rewards, self.args.discount)
 
-            reward_history.extend(rewards)
+            reward_history.append(rewards.item())
             entropy_history.extend(np_entropies)
 
             # moving average baseline
@@ -404,16 +396,15 @@ class Trainer(object):
                 baseline = decay * baseline + (1 - decay) * rewards
 
             adv = rewards - baseline
-            adv_history.extend(adv)
+            adv_history.append(adv.item())
 
             # policy loss
             loss = -log_probs*utils.get_variable(adv,
                                                  self.cuda,
                                                  requires_grad=False)
-            if self.args.entropy_mode == 'regularizer':
-                loss -= self.args.entropy_coeff * entropies
 
             loss = loss.sum()  # or loss.mean()
+            loss -= self.args.entropy_coeff * entropies.mean()
 
             # update
             self.controller_optim.zero_grad()
