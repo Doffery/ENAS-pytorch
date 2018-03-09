@@ -228,16 +228,27 @@ class Trainer(object):
         if not isinstance(dags, list):
             dags = [dags]
 
-        loss = 0
+        losses = []
+        hiddens = []
         for dag in dags:
-            output, hidden, extra_out = self.shared(inputs, dag, hidden=hidden)
+            output, next_hidden, extra_out = self.shared(inputs,
+                                                         dag,
+                                                         hidden=hidden)
+            hiddens.append(next_hidden)
+
             output_flat = output.view(-1, self.dataset.num_tokens)
             sample_loss = (self.ce(output_flat, targets) /
                            self.args.shared_num_sample)
-            loss += sample_loss
+            losses.append(sample_loss)
 
-        assert len(dags) == 1, 'there are multiple `hidden` for multple `dags`'
-        return loss, hidden, extra_out
+        losses = torch.stack(losses).squeeze()
+
+        # NOTE(brendan): When training the policy, use the expected value of
+        # the hidden states to pass to the next batch of model samples.
+        if len(dags) > 1:
+            hidden = torch.mean(torch.stack(hiddens), dim=0)
+
+        return losses, hidden, extra_out
 
     def train_shared(self, max_step=None):
         """Train the language model for 400 steps of minibatches of 64
@@ -369,7 +380,7 @@ class Trainer(object):
         for step in range(self.args.controller_max_step):
             # sample models
             dags, log_probs, entropies = self.controller.sample(
-                with_details=True)
+                batch_size=self.args.policy_batch_size, with_details=True)
 
             # calculate reward
             np_entropies = entropies.data.cpu().numpy()
@@ -385,25 +396,28 @@ class Trainer(object):
             if 1 > self.args.discount > 0:
                 rewards = discount(rewards, self.args.discount)
 
-            reward_history.append(rewards.item())
+            mean_reward = rewards.mean()
+            reward_history.append(mean_reward.item())
             entropy_history.extend(np_entropies)
 
             # moving average baseline
             if baseline is None:
-                baseline = rewards
+                baseline = mean_reward
             else:
                 decay = self.args.ema_baseline_decay
-                baseline = decay * baseline + (1 - decay) * rewards
+                baseline = decay*baseline + (1 - decay)*mean_reward
 
             adv = rewards - baseline
-            adv_history.append(adv.item())
+            adv_history.append(adv.mean().item())
 
             # policy loss
             loss = -log_probs*utils.get_variable(adv,
                                                  self.cuda,
                                                  requires_grad=False)
 
-            loss = loss.sum()  # or loss.mean()
+            # NOTE(brendan): Sum over the sequence length, and take the mean
+            # over the batch size.
+            loss = loss.sum(dim=-1).mean()
             loss -= self.args.entropy_coeff * entropies.mean()
 
             # update
