@@ -83,6 +83,7 @@ class Controller(torch.nn.Module):
     def __init__(self, args):
         torch.nn.Module.__init__(self)
         self.args = args
+        self.baseline = None
 
         if self.args.network_type == 'rnn':
             # NOTE(brendan): `num_tokens` here is just the activation function

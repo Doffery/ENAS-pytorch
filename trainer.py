@@ -369,7 +369,6 @@ class Trainer(object):
         # self.shared.eval()
 
         avg_reward_base = None
-        baseline = None
         adv_history = []
         entropy_history = []
         reward_history = []
@@ -401,13 +400,13 @@ class Trainer(object):
             entropy_history.extend(np_entropies)
 
             # moving average baseline
-            if baseline is None:
-                baseline = mean_reward
+            if model.baseline is None:
+                model.baseline = mean_reward
             else:
                 decay = self.args.ema_baseline_decay
-                baseline = decay*baseline + (1 - decay)*mean_reward
+                model.baseline = decay*model.baseline + (1 - decay)*mean_reward
 
-            adv = rewards - baseline
+            adv = rewards - model.baseline
             adv_history.append(adv.mean().item())
 
             # policy loss
