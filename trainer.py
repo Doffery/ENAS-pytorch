@@ -324,13 +324,10 @@ class Trainer(object):
             self.shared_step += 1
             train_idx += self.max_length
 
-    def get_reward(self, dag, entropies, hidden, valid_idx=None):
+    def get_reward(self, dag, hidden, valid_idx=None):
         """Computes the perplexity of a single sampled model on a minibatch of
         validation data.
         """
-        if not isinstance(entropies, np.ndarray):
-            entropies = entropies.data.cpu().numpy()
-
         if valid_idx:
             valid_idx = 0
 
@@ -386,10 +383,7 @@ class Trainer(object):
             # NOTE(brendan): No gradients should be backpropagated to the
             # shared model during controller training, obviously.
             with torch.no_grad():
-                rewards, hidden = self.get_reward(dags,
-                                                  np_entropies,
-                                                  hidden,
-                                                  valid_idx)
+                rewards, hidden = self.get_reward(dags, hidden, valid_idx)
 
             # discount
             if 1 > self.args.discount > 0:
@@ -493,13 +487,12 @@ class Trainer(object):
         if sample_num is None:
             sample_num = self.args.derive_num_sample
 
-        dags, _, entropies = self.controller.sample(sample_num,
-                                                    with_details=True)
+        dags, _, _ = self.controller.sample(sample_num, with_details=True)
 
         max_R = 0
         best_dag = None
         for dag in dags:
-            R, _ = self.get_reward(dag, entropies, hidden, valid_idx)
+            R, _ = self.get_reward(dag, hidden, valid_idx)
             if R.max() > max_R:
                 max_R = R.max()
                 best_dag = dag
