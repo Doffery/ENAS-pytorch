@@ -361,9 +361,7 @@ class Trainer(object):
         """
         model = self.controller
         model.train()
-        # TODO(brendan): Why can't we call shared.eval() here? Leads to loss
-        # being uniformly zero for the controller.
-        # self.shared.eval()
+        self.shared.eval()
 
         avg_reward_base = None
         adv_history = []
@@ -462,10 +460,7 @@ class Trainer(object):
         pbar = range(0, data.size(0) - 1, self.max_length)
         for count, idx in enumerate(pbar):
             inputs, targets = self.get_batch(data, idx)
-            output, hidden, _ = self.shared(inputs,
-                                            dag,
-                                            hidden=hidden,
-                                            is_train=False)
+            output, hidden, _ = self.shared(inputs, dag, hidden=hidden)
             output_flat = output.view(-1, self.dataset.num_tokens)
             total_loss += len(inputs) * self.ce(output_flat, targets).data
             hidden = utils.detach(hidden)

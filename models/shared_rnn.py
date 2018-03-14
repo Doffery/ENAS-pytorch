@@ -199,12 +199,11 @@ class RNN(models.shared_base.SharedModel):
     def forward(self,  # pylint:disable=arguments-differ
                 inputs,
                 dag,
-                hidden=None,
-                is_train=True):
+                hidden=None):
         time_steps = inputs.size(0)
         batch_size = inputs.size(1)
 
-        is_train = is_train and self.args.mode in ['train']
+        is_train = self.training and self.args.mode in ['train']
 
         self.w_hh = _get_dropped_weights(self.w_hh_raw,
                                          self.args.shared_wdrop,
@@ -237,18 +236,18 @@ class RNN(models.shared_base.SharedModel):
         for step in range(time_steps):
             x_t = embed[step]
             logit, hidden = self.cell(x_t, hidden, dag)
-            hidden_norms = hidden.norm(dim=-1)
-            max_norm = 25.0
+
+            hidden_norms = hidden.data.norm(dim=-1)
+
+            max_norm = self.args.shared_max_hidden_norm
             if hidden_norms.max() > max_norm:
                 clipped_num += 1
                 if hidden_norms.max() > max_clipped_norm:
                     max_clipped_norm = hidden_norms.max()
 
-                norm = hidden[hidden_norms > max_norm].norm(dim=-1)
+                norm = hidden.data[hidden_norms > max_norm].norm(dim=-1)
                 norm = norm.unsqueeze(-1)
-                detached_norm = torch.autograd.Variable(norm.data,
-                                                        requires_grad=False)
-                hidden[hidden_norms > max_norm] *= max_norm/detached_norm
+                hidden[hidden_norms > max_norm] *= max_norm/norm
 
             logits.append(logit)
             h1tohT.append(hidden)
