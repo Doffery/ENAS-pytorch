@@ -145,7 +145,7 @@ def _clip_hidden_norms(hidden, hidden_norms, max_norm):
     if utils.get_pytorch_version() < 0.4:
         # NOTE(brendan): This workaround for PyTorch v0.3.1 does everything in
         # numpy, because the PyTorch slicing and slice assignment is too flaky.
-        hidden_norms = hidden_norms.data.cpu().numpy()
+        hidden_norms = hidden_norms.cpu().numpy()
         clip_select = hidden_norms > max_norm
         clip_norms = hidden_norms[clip_select]
 
