@@ -53,7 +53,7 @@ def _apply_penalties(extra_out, args):
     # Norm stabilizer regularization
     if args.norm_stabilizer_regularization:
         penalty += (args.norm_stabilizer_regularization_amount *
-                    (extra_out['hiddens'].norm(dim=-1) -
+                    (extra_out['hiddens'].norm(p=2, dim=-1) -
                      args.norm_stabilizer_fixed_point).pow(2).mean())
 
     return penalty
@@ -239,16 +239,27 @@ class Trainer(object):
         if not isinstance(dags, list):
             dags = [dags]
 
-        loss = 0
+        losses = []
+        hiddens = []
         for dag in dags:
-            output, hidden, extra_out = self.shared(inputs, dag, hidden=hidden)
+            output, next_hidden, extra_out = self.shared(inputs,
+                                                         dag,
+                                                         hidden=hidden)
+            hiddens.append(next_hidden)
+
             output_flat = output.view(-1, self.dataset.num_tokens)
             sample_loss = (self.ce(output_flat, targets) /
                            self.args.shared_num_sample)
-            loss += sample_loss
+            losses.append(sample_loss)
 
-        assert len(dags) == 1, 'there are multiple `hidden` for multple `dags`'
-        return loss, hidden, extra_out
+        losses = torch.stack(losses)
+
+        # NOTE(brendan): When training the policy, use the expected value of
+        # the hidden states to pass to the next batch of model samples.
+        if len(dags) > 1:
+            hidden = torch.mean(torch.stack(hiddens), dim=0)
+
+        return losses, hidden, extra_out
 
     def train_shared(self, max_step=None):
         """Train the language model for 400 steps of minibatches of 64
@@ -280,7 +291,9 @@ class Trainer(object):
         raw_total_loss = 0
         total_loss = 0
         train_idx = 0
-        # TODO(brendan): Why - 1 - 1?
+        # NOTE(brendan): The - 1 - 1 here is because each example should
+        # include at least one (x_t, y_{t + 1}) sequence, since y_{t + 1} is
+        # predicted from x_t.
         while train_idx < self.train_data.size(0) - 1 - 1:
             if step > max_step:
                 break
@@ -295,7 +308,7 @@ class Trainer(object):
                                                     hidden,
                                                     dags)
             hidden = utils.detach(hidden)
-            raw_total_loss += loss.data
+            raw_total_loss += loss.data.squeeze()
 
             loss += _apply_penalties(extra_out, self.args)
 
@@ -305,16 +318,18 @@ class Trainer(object):
 
             h1tohT = extra_out['hiddens']
             new_abs_max_hidden_norm = utils.to_item(
-                h1tohT.norm(dim=-1).data.max())
+                h1tohT.norm(p=2, dim=-1).data.max())
             if new_abs_max_hidden_norm > abs_max_hidden_norm:
                 abs_max_hidden_norm = new_abs_max_hidden_norm
                 logger.info(f'max hidden {abs_max_hidden_norm}')
+
             abs_max_grad = _check_abs_max_grad(abs_max_grad, model)
             torch.nn.utils.clip_grad_norm(model.parameters(),
                                           self.args.shared_grad_clip)
+
             self.shared_optim.step()
 
-            total_loss += loss.data
+            total_loss += loss.data.squeeze()
 
             if ((step % self.args.log_step) == 0) and (step > 0):
                 self._summarize_shared_train(total_loss, raw_total_loss)
@@ -325,13 +340,10 @@ class Trainer(object):
             self.shared_step += 1
             train_idx += self.max_length
 
-    def get_reward(self, dag, entropies, hidden, valid_idx=None):
+    def get_reward(self, dag, hidden, valid_idx=None):
         """Computes the perplexity of a single sampled model on a minibatch of
         validation data.
         """
-        if not isinstance(entropies, np.ndarray):
-            entropies = entropies.data.cpu().numpy()
-
         if valid_idx:
             valid_idx = 0
 
@@ -340,9 +352,8 @@ class Trainer(object):
                                          self.max_length,
                                          volatile=True)
         valid_loss, hidden, _ = self.get_loss(inputs, targets, hidden, dag)
-        valid_loss = utils.to_item(valid_loss.data)
 
-        valid_ppl = math.exp(valid_loss)
+        valid_ppl = torch.exp(valid_loss.data)
 
         # TODO: we don't know reward_c
         if self.args.ppl_square:
@@ -351,14 +362,7 @@ class Trainer(object):
         else:
             R = self.args.reward_c / valid_ppl
 
-        if self.args.entropy_mode == 'reward':
-            rewards = R + self.args.entropy_coeff * entropies
-        elif self.args.entropy_mode == 'regularizer':
-            rewards = R * np.ones_like(entropies)
-        else:
-            raise NotImplementedError(f'Unkown entropy mode: {self.args.entropy_mode}')
-
-        return rewards, hidden
+        return R, hidden
 
     def train_controller(self):
         """Fixes the shared parameters and updates the controller parameters.
@@ -374,12 +378,9 @@ class Trainer(object):
         """
         model = self.controller
         model.train()
-        # TODO(brendan): Why can't we call shared.eval() here? Leads to loss
-        # being uniformly zero for the controller.
-        # self.shared.eval()
+        self.shared.eval()
 
         avg_reward_base = None
-        baseline = None
         adv_history = []
         entropy_history = []
         reward_history = []
@@ -390,43 +391,42 @@ class Trainer(object):
         for step in range(self.args.controller_max_step):
             # sample models
             dags, log_probs, entropies = self.controller.sample(
-                with_details=True)
+                batch_size=self.args.policy_batch_size, with_details=True)
 
             # calculate reward
             np_entropies = entropies.data.cpu().numpy()
             # NOTE(brendan): No gradients should be backpropagated to the
             # shared model during controller training, obviously.
             with _get_no_grad_ctx_mgr():
-                rewards, hidden = self.get_reward(dags,
-                                                  np_entropies,
-                                                  hidden,
-                                                  valid_idx)
+                rewards, hidden = self.get_reward(dags, hidden, valid_idx)
 
             # discount
             if 1 > self.args.discount > 0:
                 rewards = discount(rewards, self.args.discount)
 
-            reward_history.extend(rewards)
+            mean_reward = rewards.mean()
+            reward_history.append(utils.to_item(mean_reward))
             entropy_history.extend(np_entropies)
 
             # moving average baseline
-            if baseline is None:
-                baseline = rewards
+            if model.baseline is None:
+                model.baseline = mean_reward
             else:
                 decay = self.args.ema_baseline_decay
-                baseline = decay * baseline + (1 - decay) * rewards
+                model.baseline = decay*model.baseline + (1 - decay)*mean_reward
 
-            adv = rewards - baseline
-            adv_history.extend(adv)
+            adv = rewards - model.baseline
+            adv_history.append(utils.to_item(adv.mean()))
 
             # policy loss
-            loss = -log_probs*utils.get_variable(adv,
+            loss = -log_probs*utils.get_variable(adv.squeeze(),
                                                  self.cuda,
                                                  requires_grad=False)
-            if self.args.entropy_mode == 'regularizer':
-                loss -= self.args.entropy_coeff * entropies
 
-            loss = loss.sum()  # or loss.mean()
+            # NOTE(brendan): Sum over the sequence length, and take the mean
+            # over the batch size.
+            loss = loss.sum(dim=-1).mean()
+            loss -= self.args.entropy_coeff * entropies.mean()
 
             # update
             self.controller_optim.zero_grad()
@@ -476,14 +476,14 @@ class Trainer(object):
 
         pbar = range(0, data.size(0) - 1, self.max_length)
         for count, idx in enumerate(pbar):
-            inputs, targets = self.get_batch(data, idx, volatile=True)
-            output, hidden, _ = self.shared(inputs,
-                                            dag,
-                                            hidden=hidden,
-                                            is_train=False)
+            inputs, targets = self.get_batch(data, idx)
+            output, hidden, _ = self.shared(inputs, dag, hidden=hidden)
+
+            hidden = utils.detach(hidden)
+
             output_flat = output.view(-1, self.dataset.num_tokens)
             total_loss += len(inputs) * self.ce(output_flat, targets).data
-            hidden = utils.detach(hidden)
+
             ppl = math.exp(utils.to_item(total_loss) / (count + 1) / self.max_length)
 
         val_loss = utils.to_item(total_loss) / len(data)
@@ -502,13 +502,12 @@ class Trainer(object):
         if sample_num is None:
             sample_num = self.args.derive_num_sample
 
-        dags, _, entropies = self.controller.sample(sample_num,
-                                                    with_details=True)
+        dags, _, _ = self.controller.sample(sample_num, with_details=True)
 
         max_R = 0
         best_dag = None
         for dag in dags:
-            R, _ = self.get_reward(dag, entropies, hidden, valid_idx)
+            R, _ = self.get_reward(dag, hidden, valid_idx)
             if R.max() > max_R:
                 max_R = R.max()
                 best_dag = dag

@@ -1,6 +1,4 @@
 """Entry point."""
-import os
-
 import torch
 
 import data

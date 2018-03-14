@@ -83,6 +83,7 @@ class Controller(torch.nn.Module):
     def __init__(self, args):
         torch.nn.Module.__init__(self)
         self.args = args
+        self.baseline = None
 
         if self.args.network_type == 'rnn':
             # NOTE(brendan): `num_tokens` here is just the activation function
@@ -180,28 +181,26 @@ class Controller(torch.nn.Module):
 
             probs = F.softmax(logits, dim=-1)
             log_prob = F.log_softmax(logits, dim=-1)
-            # TODO(brendan): .mean() for entropy?
             entropy = -(log_prob * probs).sum(1, keepdim=False)
 
             action = probs.multinomial(num_samples=1).data
             selected_log_prob = log_prob.gather(
                 1, utils.get_variable(action, requires_grad=False))
 
-            # TODO(brendan): why the [:, 0] here? Should it be .squeeze(), or
-            # .view()? Same below with `action`.
             entropies.append(entropy)
-            log_probs.append(selected_log_prob[:, 0])
+            log_probs.append(selected_log_prob.squeeze(dim=1))
 
             # 0: function, 1: previous node
             mode = block_idx % 2
+            action = action.squeeze(dim=1)
             inputs = utils.get_variable(
-                action[:, 0] + sum(self.num_tokens[:mode]),
+                action + sum(self.num_tokens[:mode]),
                 requires_grad=False)
 
             if mode == 0:
-                activations.append(action[:, 0])
+                activations.append(action)
             elif mode == 1:
-                prev_nodes.append(action[:, 0])
+                prev_nodes.append(action)
 
         prev_nodes = torch.stack(prev_nodes).transpose(0, 1)
         activations = torch.stack(activations).transpose(0, 1)
@@ -217,7 +216,7 @@ class Controller(torch.nn.Module):
                                    os.path.join(save_dir, f'graph{idx}.png'))
 
         if with_details:
-            return dags, torch.cat(log_probs), torch.cat(entropies)
+            return dags, torch.stack(log_probs), torch.cat(entropies)
 
         return dags
 

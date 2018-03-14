@@ -44,10 +44,6 @@ def _get_dropped_weights(w_raw, dropout_p, is_training):
     return dropped_w
 
 
-def isnan(tensor):
-    return np.isnan(tensor.cpu().data.numpy()).sum() > 0
-
-
 class EmbeddingDropout(torch.nn.Embedding):
     """Class for dropping out embeddings by zero'ing out parameters in the
     embedding matrix.
@@ -131,6 +127,43 @@ class LockedDropout(nn.Module):
         return mask * x
 
 
+def _clip_hidden_norms(hidden, hidden_norms, max_norm):
+    """Clips the hiddens to `max_norm`.
+
+    Args:
+        hidden: A `torch.autograd.Variable` hidden state.
+        hidden_norms: A `torch.FloatTensor` of hidden norms, size [batch_size].
+        max_norm: Norm to clip to.
+
+    Returns:
+        The clipped hiddens.
+
+    The caller should check first that `hidden` should be clipped, and this
+    function should _only_ be called if at least one hidden needs to be
+    clipped.
+    """
+    if utils.get_pytorch_version() < 0.4:
+        # NOTE(brendan): This workaround for PyTorch v0.3.1 does everything in
+        # numpy, because the PyTorch slicing and slice assignment is too flaky.
+        hidden_norms = hidden_norms.data.cpu().numpy()
+        clip_select = hidden_norms > max_norm
+        clip_norms = hidden_norms[clip_select]
+
+        mask = np.ones(hidden.size())
+        normalizer = max_norm/clip_norms
+        normalizer = normalizer[:, np.newaxis]
+
+        mask[clip_select] = normalizer
+        hidden *= torch.autograd.Variable(
+            torch.FloatTensor(mask).cuda(), requires_grad=False)
+    else:
+        norm = hidden.data[hidden_norms > max_norm].norm(p=2, dim=-1)
+        norm = norm.unsqueeze(-1)
+        hidden[hidden_norms > max_norm] *= max_norm/norm
+
+    return hidden
+
+
 class RNN(models.shared_base.SharedModel):
     """Shared RNN model."""
     def __init__(self, args, corpus):
@@ -195,12 +228,11 @@ class RNN(models.shared_base.SharedModel):
     def forward(self,  # pylint:disable=arguments-differ
                 inputs,
                 dag,
-                hidden=None,
-                is_train=True):
+                hidden=None):
         time_steps = inputs.size(0)
         batch_size = inputs.size(1)
 
-        is_train = is_train and self.args.mode in ['train']
+        is_train = self.training and self.args.mode in ['train']
 
         self.w_hh = _get_dropped_weights(self.w_hh_raw,
                                          self.args.shared_wdrop,
@@ -234,31 +266,15 @@ class RNN(models.shared_base.SharedModel):
             x_t = embed[step]
             logit, hidden = self.cell(x_t, hidden, dag)
 
-            hidden_norms = hidden.norm(dim=-1)
-            max_norm = 25.0
-            if hidden_norms.data.max() > max_norm:
-                # TODO(brendan): Just directly use the torch slice operations
-                # in PyTorch v0.4.
-                #
-                # This workaround for PyTorch v0.3.1 does everything in numpy,
-                # because the PyTorch slicing and slice assignment is too
-                # flaky.
-                hidden_norms = hidden_norms.data.cpu().numpy()
-
+            hidden_norms = hidden.data.norm(p=2, dim=-1)
+            max_norm = self.args.shared_max_hidden_norm
+            if hidden_norms.max() > max_norm:
                 clipped_num += 1
+
                 if hidden_norms.max() > max_clipped_norm:
                     max_clipped_norm = hidden_norms.max()
 
-                clip_select = hidden_norms > max_norm
-                clip_norms = hidden_norms[clip_select]
-
-                mask = np.ones(hidden.size())
-                normalizer = max_norm/clip_norms
-                normalizer = normalizer[:, np.newaxis]
-
-                mask[clip_select] = normalizer
-                hidden *= torch.autograd.Variable(
-                    torch.FloatTensor(mask).cuda(), requires_grad=False)
+                hidden = _clip_hidden_norms(hidden, hidden_norms, max_norm)
 
             logits.append(logit)
             h1tohT.append(hidden)
