@@ -59,6 +59,20 @@ def _apply_penalties(extra_out, args):
     return penalty
 
 
+def _check_max_hidden(abs_max_hidden_norm, h1tohT):
+    """Debugging function that checks if `h1tohT` contains a new largest hidden
+    state (as measured by L2 norm), and returns the (potentially updated)
+    largest hidden state L2 norm.
+    """
+    new_abs_max_hidden_norm = utils.to_item(
+        h1tohT.norm(p=2, dim=-1).data.max())
+    if new_abs_max_hidden_norm > abs_max_hidden_norm:
+        abs_max_hidden_norm = new_abs_max_hidden_norm
+        logger.info(f'max hidden {abs_max_hidden_norm}')
+
+    return abs_max_hidden_norm
+
+
 def discount(x, amount):
     return scipy.signal.lfilter([1], [1, -amount], x[::-1], axis=0)[::-1]
 
@@ -295,13 +309,20 @@ class Trainer(object):
         # include at least one (x_t, y_{t + 1}) sequence, since y_{t + 1} is
         # predicted from x_t.
         while train_idx < self.train_data.size(0) - 1 - 1:
-            if step > max_step:
-                break
+            bptt = self.max_length
+            if np.random.random() >= 0.95:
+                bptt /= 2.
+
+            seq_len = int(np.random.normal(bptt, 5))
+            seq_len = max(5, seq_len)
+
+            saved_lr = self.shared_optim.param_groups[0]['lr']
+            self.shared_optim.param_groups[0]['lr'] = saved_lr*seq_len/bptt
 
             dags = self.controller.sample(self.args.shared_num_sample)
             inputs, targets = self.get_batch(self.train_data,
                                              train_idx,
-                                             self.max_length)
+                                             seq_len)
 
             loss, hidden, extra_out = self.get_loss(inputs,
                                                     targets,
@@ -316,12 +337,8 @@ class Trainer(object):
             self.shared_optim.zero_grad()
             loss.backward()
 
-            h1tohT = extra_out['hiddens']
-            new_abs_max_hidden_norm = utils.to_item(
-                h1tohT.norm(p=2, dim=-1).data.max())
-            if new_abs_max_hidden_norm > abs_max_hidden_norm:
-                abs_max_hidden_norm = new_abs_max_hidden_norm
-                logger.info(f'max hidden {abs_max_hidden_norm}')
+            abs_max_hidden_norm = _check_max_hidden(abs_max_hidden_norm,
+                                                    extra_out['hiddens'])
 
             abs_max_grad = _check_abs_max_grad(abs_max_grad, model)
             torch.nn.utils.clip_grad_norm(model.parameters(),
@@ -330,6 +347,7 @@ class Trainer(object):
             self.shared_optim.step()
 
             total_loss += loss.data.squeeze()
+            self.shared_optim.param_groups[0]['lr'] = saved_lr
 
             if ((step % self.args.log_step) == 0) and (step > 0):
                 self._summarize_shared_train(total_loss, raw_total_loss)
@@ -338,7 +356,7 @@ class Trainer(object):
 
             step += 1
             self.shared_step += 1
-            train_idx += self.max_length
+            train_idx += seq_len
 
     def get_reward(self, dag, hidden, valid_idx=None):
         """Computes the perplexity of a single sampled model on a minibatch of
