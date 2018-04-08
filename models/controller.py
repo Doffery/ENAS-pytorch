@@ -7,6 +7,7 @@ import torch.nn.functional as F
 
 import utils
 
+logger = utils.get_logger()
 
 Node = collections.namedtuple('Node', ['id', 'name'])
 
@@ -46,6 +47,7 @@ def _construct_dags(prev_nodes, activations, func_names, num_blocks):
         dag = collections.defaultdict(list)
 
         # add first node
+        logger.info(f'[Debug] The size of func_names: {len(func_names)}, i:{func_ids[0]}')
         dag[-1] = [Node(0, func_names[func_ids[0]])]
         dag[-2] = [Node(0, func_names[func_ids[0]])]
 

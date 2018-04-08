@@ -5,9 +5,12 @@ import data
 import config
 import utils
 import trainer
+import os
+
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 logger = utils.get_logger()
-
 
 def main(args):  # pylint:disable=redefined-outer-name
     """main: Entry point."""
